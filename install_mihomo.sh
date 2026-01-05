@@ -212,6 +212,56 @@ random_password_15() {
   openssl rand -base64 24 | tr -d "=+/" | cut -c1-15
 }
 
+generate_uuid() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then
+    cat /proc/sys/kernel/random/uuid
+    return 0
+  fi
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen
+    return 0
+  fi
+  # 兜底：openssl 生成伪 UUID（足够使用）
+  openssl rand -hex 16 | sed -E 's/^(.{8})(.{4})(.{4})(.{4})(.{12}).*$/\1-\2-\3-\4-\5/'
+}
+
+generate_short_id_12() {
+  # reality short-id 常用 12 hex（示例：a1b2c3d4e5f6）
+  openssl rand -hex 6
+}
+
+generate_reality_keypair() {
+  # 输出：private_key|public_key
+  local bin out priv pub token1 token2
+  bin="/root/mihomo/mihomo"
+  if [ ! -x "$bin" ]; then
+    echo "错误：mihomo 二进制不存在，无法生成 reality keypair"
+    exit 1
+  fi
+
+  out="$("$bin" generate reality-keypair 2>/dev/null || "$bin" generate reality-keypair 2>&1 || true)"
+
+  # 常见输出格式包含 PrivateKey/PublicKey 字段
+  priv="$(echo "$out" | sed -n 's/.*[Pp]rivate[- ]\?[Kk]ey[: ]\+//p' | head -n 1 | tr -d '"')"
+  pub="$(echo "$out" | sed -n 's/.*[Pp]ublic[- ]\?[Kk]ey[: ]\+//p' | head -n 1 | tr -d '"')"
+
+  # 兜底：从输出中抓取两个类似 base64url 的长 token
+  if [ -z "$priv" ] || [ -z "$pub" ]; then
+    token1="$(echo "$out" | grep -Eo '[A-Za-z0-9_-]{40,}' | head -n 1 || true)"
+    token2="$(echo "$out" | grep -Eo '[A-Za-z0-9_-]{40,}' | sed -n '2p' || true)"
+    priv="${priv:-$token1}"
+    pub="${pub:-$token2}"
+  fi
+
+  if [ -z "$priv" ] || [ -z "$pub" ]; then
+    echo "错误：无法解析 mihomo 生成的 reality keypair 输出："
+    echo "$out"
+    exit 1
+  fi
+
+  echo "${priv}|${pub}"
+}
+
 port_in_use() {
   local port="$1"
   if command -v ss >/dev/null 2>&1; then
@@ -231,6 +281,20 @@ find_available_port_52000_56000() {
   for _ in {1..200}; do
     p=$((52000 + RANDOM % 4001))
     if ! port_in_use "$p"; then
+      echo "$p"
+      return 0
+    fi
+  done
+  echo "0"
+  return 1
+}
+
+find_available_port_52000_56000_excluding() {
+  local excluded="$1"
+  local p
+  for _ in {1..200}; do
+    p="$(find_available_port_52000_56000 || echo 0)"
+    if [ "$p" != "0" ] && [ "$p" != "$excluded" ]; then
       echo "$p"
       return 0
     fi
@@ -361,8 +425,26 @@ if [ "$PORT" = "0" ]; then
 fi
 PASSWORD="$(random_password_15)"
 
-echo "已选择端口：$PORT"
-echo "已生成密码：$PASSWORD"
+echo "已选择 AnyTLS 端口：$PORT"
+echo "已生成 AnyTLS 密码：$PASSWORD"
+
+# vless + reality 参数
+REALITY_PORT="$(find_available_port_52000_56000_excluding "$PORT" || echo 0)"
+if [ "$REALITY_PORT" = "0" ]; then
+  echo "错误：未能为 reality 找到可用端口（52000-56000）"
+  exit 1
+fi
+VLESS_UUID="$(generate_uuid)"
+SHORT_ID="$(generate_short_id_12)"
+KEYPAIR="$(generate_reality_keypair)"
+REALITY_PRIVATE_KEY="${KEYPAIR%%|*}"
+REALITY_PUBLIC_KEY="${KEYPAIR#*|}"
+REALITY_DEST="www.microsoft.com:443"
+REALITY_SERVER_NAME="www.microsoft.com"
+
+echo "已选择 Reality 端口：$REALITY_PORT"
+echo "${REALITY_PUBLIC_KEY}" > /root/mihomo/.pub
+chmod 600 /root/mihomo/.pub || true
 
 # anytls 需要证书/私钥：首次安装时自动生成一对自签证书（避免服务启动时报缺少字段）
 CERT_FILE="/root/mihomo/server.cer"
@@ -397,6 +479,21 @@ listeners:
     5=500-1000
     6=500-1000
     7=500-1000
+- name: "入站-reality"
+  type: vless
+  listen: "0.0.0.0"
+  port: "${REALITY_PORT}"
+  proxy-protocol: true
+  users:
+    - name: "default"
+      uuid: "${VLESS_UUID}"
+      flow: xtls-rprx-vision
+  reality-config:
+    private-key: "${REALITY_PRIVATE_KEY}"
+    short-id: ["${SHORT_ID}"]
+    dest: "${REALITY_DEST}"
+    server-names:
+      - "${REALITY_SERVER_NAME}"
 EOF
 
 echo "已创建默认配置：/root/mihomo/config.yaml"
@@ -427,6 +524,15 @@ if command -v systemctl >/dev/null 2>&1; then
   if systemctl is-active --quiet mihomo.service; then
     systemctl --no-pager --full status mihomo.service || true
     echo "mihomo 安装完成并已启动服务。"
+    echo "=== 入站信息（请保存）==="
+    echo "AnyTLS 端口: ${PORT}"
+    echo "AnyTLS 密码: ${PASSWORD}"
+    echo "VLESS Reality 端口: ${REALITY_PORT}"
+    echo "VLESS UUID: ${VLESS_UUID}"
+    echo "Reality dest/SNI: ${REALITY_DEST}"
+    echo "Reality public-key: ${REALITY_PUBLIC_KEY}"
+    echo "Reality public-key 文件: /root/mihomo/.pub"
+    echo "Reality short-id: ${SHORT_ID}"
   else
     echo "错误：mihomo 服务启动失败，请检查配置与日志："
     systemctl --no-pager --full status mihomo.service || true
