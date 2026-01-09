@@ -443,7 +443,22 @@ REALITY_DEST="www.microsoft.com:443"
 REALITY_SERVER_NAME="www.microsoft.com"
 
 echo "已选择 Reality 端口：$REALITY_PORT"
-echo "${REALITY_PUBLIC_KEY}" > /root/mihomo/.pub
+cat > /root/mihomo/.pub << EOF
+# VLESS + Reality 客户端参数（请妥善保存）
+address: <your_server_ip_or_domain>
+port: ${REALITY_PORT}
+uuid: ${VLESS_UUID}
+flow: xtls-rprx-vision
+sni: ${REALITY_SERVER_NAME}
+dest: ${REALITY_DEST}
+public-key: ${REALITY_PUBLIC_KEY}
+short-id: ${SHORT_ID}
+
+# AnyTLS 客户端参数（请妥善保存）
+anytls-address: <your_server_ip_or_domain>
+anytls-port: ${PORT}
+anytls-user: ${PASSWORD}
+EOF
 chmod 600 /root/mihomo/.pub || true
 
 # anytls 需要证书/私钥：首次安装时自动生成一对自签证书（避免服务启动时报缺少字段）
