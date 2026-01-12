@@ -44,6 +44,18 @@ User=root
 WantedBy=multi-user.target
 EOF
 
+
+# 检查并挂载 BPF 文件系统（rfw --log-port-access 必须）
+if ! mountpoint -q /sys/fs/bpf; then
+    echo "正在挂载 BPF 文件系统..."
+    sudo mkdir -p /sys/fs/bpf
+    sudo mount -t bpf bpf /sys/fs/bpf
+    # 写入 fstab 确保重启不失效
+    if ! grep -q "bpf" /etc/fstab; then
+        echo 'bpffs /sys/fs/bpf bpf defaults 0 0' | sudo tee -a /etc/fstab
+    fi
+fi
+
 # 4. 设置 Crontab (确保唯一性)
 CRON_JOB="0 3 * * 1 /usr/bin/systemctl restart rfw"
 # 只有在 crontab 里搜不到这行时才添加
