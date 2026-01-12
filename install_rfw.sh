@@ -36,7 +36,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/rfw --iface $IFACE --countries CN --block-fet-strict
+ExecStart=/usr/local/bin/rfw --iface $IFACE --countries CN --block-fet-strict --log-port-access
 Restart=on-failure
 User=root
 
