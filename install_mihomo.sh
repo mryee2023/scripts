@@ -303,6 +303,21 @@ find_available_port_52000_56000_excluding() {
   return 1
 }
 
+find_available_port_52000_56000_excluding_two() {
+  local e1="$1"
+  local e2="$2"
+  local p
+  for _ in {1..200}; do
+    p="$(find_available_port_52000_56000 || echo 0)"
+    if [ "$p" != "0" ] && [ "$p" != "$e1" ] && [ "$p" != "$e2" ]; then
+      echo "$p"
+      return 0
+    fi
+  done
+  echo "0"
+  return 1
+}
+
 download_and_install_mihomo_binary() {
   local url="$1"
   local tmp_dir archive_name ext
@@ -443,6 +458,17 @@ REALITY_DEST="www.microsoft.com:443"
 REALITY_SERVER_NAME="www.microsoft.com"
 
 echo "已选择 Reality 端口：$REALITY_PORT"
+
+# Shadowsocks 2022 参数（密码与 AnyTLS 同算法：random_password_15，openssl 随机 15 位可见字符）
+SS_PORT="$(find_available_port_52000_56000_excluding_two "$PORT" "$REALITY_PORT" || echo 0)"
+if [ "$SS_PORT" = "0" ]; then
+  echo "错误：未能为 Shadowsocks 找到可用端口（52000-56000）"
+  exit 1
+fi
+SS_PASSWORD="$(random_password_15)"
+echo "已选择 Shadowsocks 端口：$SS_PORT"
+echo "已生成 Shadowsocks 密码：$SS_PASSWORD"
+
 cat > /root/mihomo/.pub << EOF
 # VLESS + Reality 客户端参数（请妥善保存）
 address: <your_server_ip_or_domain>
@@ -458,6 +484,12 @@ short-id: ${SHORT_ID}
 anytls-address: <your_server_ip_or_domain>
 anytls-port: ${PORT}
 anytls-user: ${PASSWORD}
+
+# Shadowsocks 2022 客户端参数（请妥善保存）
+ss-address: <your_server_ip_or_domain>
+ss-port: ${SS_PORT}
+ss-password: ${SS_PASSWORD}
+ss-cipher: 2022-blake3-aes-128-gcm
 EOF
 chmod 600 /root/mihomo/.pub || true
 
@@ -509,6 +541,17 @@ listeners:
     dest: "${REALITY_DEST}"
     server-names:
       - "${REALITY_SERVER_NAME}"
+- name: "入站-shadowsocks"
+  type: shadowsocks
+  listen: "0.0.0.0"
+  port: "${SS_PORT}"
+  password: "${SS_PASSWORD}"
+  cipher: 2022-blake3-aes-128-gcm
+
+rules:
+- SRC-GEOIP,cn,REJECT
+- GEOIP,CN,REJECT
+- MATCH,DIRECT
 EOF
 
 echo "已创建默认配置：/root/mihomo/config.yaml"
@@ -548,6 +591,9 @@ if command -v systemctl >/dev/null 2>&1; then
     echo "Reality public-key: ${REALITY_PUBLIC_KEY}"
     echo "Reality public-key 文件: /root/mihomo/.pub"
     echo "Reality short-id: ${SHORT_ID}"
+    echo "Shadowsocks 端口: ${SS_PORT}"
+    echo "Shadowsocks 密码: ${SS_PASSWORD}"
+    echo "Shadowsocks 加密: 2022-blake3-aes-128-gcm"
   else
     echo "错误：mihomo 服务启动失败，请检查配置与日志："
     systemctl --no-pager --full status mihomo.service || true
