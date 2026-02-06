@@ -507,6 +507,16 @@ fi
 
 # 生成默认配置（仅在未安装时创建）
 cat > /root/mihomo/config.yaml << EOF
+rule-anchor:
+  ip: &ip {type: http, interval: 86400, behavior: ipcidr, format: mrs}
+  domain: &domain {type: http, interval: 86400, behavior: domain, format: mrs}
+
+rule-providers:
+  geoip-cn:
+    <<: *ip
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cn.mrs"
+
+
 listeners:
 - name: anytls-in
   type: anytls
@@ -549,8 +559,7 @@ listeners:
   cipher: 2022-blake3-aes-128-gcm
 
 rules:
-- SRC-GEOIP,cn,REJECT
-- GEOIP,CN,REJECT
+- SRC-GEOIP,geoip-cn,REJECT
 - MATCH,DIRECT
 EOF
 
