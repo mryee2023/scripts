@@ -1,4 +1,4 @@
-sudo cat << 'EOF' > /usr/local/bin/pm
+sudo cat << 'EOF' > /usr/local/bin/gfw
 #!/bin/bash
 
 # --- 核心配置 ---
@@ -71,10 +71,10 @@ del_port() {
 
 usage() {
     echo "端口管理器 (中国 IP 黑名单版)"
-    echo "用法: pm -a [端口]  <- 封锁"
-    echo "      pm -d [端口]  <- 解封"
-    echo "      pm -u         <- 手动更新 IP 库"
-    echo "      pm -l         <- 查看列表"
+    echo "用法: gfw -a [端口]  <- 封锁"
+    echo "      gfw -d [端口]  <- 解封"
+    echo "      gfw -u         <- 手动更新 IP 库"
+    echo "      gfw -l         <- 查看列表"
     exit 1
 }
 
@@ -96,5 +96,5 @@ while getopts "a:d:lu" opt; do
 done
 EOF
 
-sudo chmod +x /usr/local/bin/pm
-sudo pm -u
+sudo chmod +x /usr/local/bin/gfw
+sudo gfw -u
