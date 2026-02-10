@@ -4,16 +4,34 @@ sudo cat << 'EOF' > /usr/local/bin/gfw
 # --- 核心配置 ---
 CN_IP_URL="https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china.txt"
 IPSET_CONF="/etc/ipset.conf"
-IPTABLES_RULES="/etc/iptables/rules.v4"
+IPTABLES_DIR="/etc/iptables"
+IPTABLES_RULES="$IPTABLES_DIR/rules.v4"
 
+# 检查 root 权限
 if [ "$EUID" -ne 0 ]; then 
   echo "错误: 请以 root 权限运行此脚本。"
   exit 1
 fi
 
+# 获取 ipset 的绝对路径，防止 command not found
+get_ipset_path() {
+    local p=$(which ipset)
+    if [ -z "$p" ]; then
+        echo "/sbin/ipset" # 默认兜底路径
+    else
+        echo "$p"
+    fi
+}
+IPSET_BIN=$(get_ipset_path)
+
 prepare_env() {
+    # 确保目录存在
+    [ ! -d "$IPTABLES_DIR" ] && mkdir -p "$IPTABLES_DIR"
+
     if ! command -v ipset &> /dev/null; then
+        echo "正在安装必要组件 (ipset, curl, iptables-persistent)..."
         apt update && apt install -y ipset curl iptables-persistent
+        IPSET_BIN=$(get_ipset_path)
     fi
 }
 
@@ -24,16 +42,14 @@ update_ip_list() {
     if curl -s -L -o "$TEMP_FILE" "$CN_IP_URL"; then
         sed -i 's/\r//g' "$TEMP_FILE"
         
-        # 使用更兼容的参数写法：--hashsize --maxelem
-        # 并在开头包含 exist 参数
         {
             echo "create china_list hash:net family inet hashsize 4096 maxelem 131072 -exist"
             echo "flush china_list"
             awk '{print "add china_list " $1}' "$TEMP_FILE"
-        } | ipset restore
+        } | $IPSET_BIN restore
 
         rm "$TEMP_FILE"
-        ipset save > "$IPSET_CONF"
+        $IPSET_BIN save > "$IPSET_CONF"
         echo "IP 库更新成功！时间: $(date)"
     else
         echo "错误: 下载 IP 库失败。"
@@ -43,13 +59,13 @@ update_ip_list() {
 }
 
 save_rules() {
-    ipset save > "$IPSET_CONF"
+    $IPSET_BIN save > "$IPSET_CONF"
     iptables-save > "$IPTABLES_RULES"
+    echo "配置已持久化到 $IPTABLES_RULES"
 }
 
 add_port() {
-    # 这里的参数也保持一致
-    ipset create china_list hash:net family inet hashsize 4096 maxelem 131072 -exist 2>/dev/null
+    $IPSET_BIN create china_list hash:net family inet hashsize 4096 maxelem 131072 -exist 2>/dev/null
     local port=$1
     if ! iptables -C INPUT -p tcp --dport "$port" -m set --match-set china_list src -j DROP 2>/dev/null; then
         iptables -I INPUT -p tcp --dport "$port" -m set --match-set china_list src -j DROP
@@ -70,7 +86,7 @@ del_port() {
 }
 
 usage() {
-    echo "端口管理器 (中国 IP 黑名单版)"
+    echo "GFW 端口黑名单管理器"
     echo "用法: gfw -a [端口]  <- 封锁"
     echo "      gfw -d [端口]  <- 解封"
     echo "      gfw -u         <- 手动更新 IP 库"
@@ -96,5 +112,6 @@ while getopts "a:d:lu" opt; do
 done
 EOF
 
+# 授权并执行初始化
 sudo chmod +x /usr/local/bin/gfw
 sudo gfw -u
