@@ -88,8 +88,13 @@ if [ ${#existing_ports[@]} -gt 0 ]; then
     echo "当前已配置的 block 端口: ${existing_ports[*]}"
 fi
 
+# 管道执行时 stdin 来自管道，从 /dev/tty 读取才能正常交互（如 curl ... | bash）
 while true; do
-    read -r -p "请输入需要 block 的端口（多个端口用空格分隔，直接回车则仅使用已有端口）: " input_ports
+    if [ -r /dev/tty ]; then
+        read -r -p "请输入需要 block 的端口（多个端口用空格分隔，直接回车则仅使用已有端口）: " input_ports < /dev/tty
+    else
+        read -r -p "请输入需要 block 的端口（多个端口用空格分隔，直接回车则仅使用已有端口）: " input_ports
+    fi
     # 规范化：逗号、空格均可，只保留数字
     new_ports=()
     for p in $input_ports; do
