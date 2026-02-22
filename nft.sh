@@ -11,6 +11,136 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# 从 TARGET_BLOCK_FILE 解析已配置的端口列表（用于帮助菜单与主流程）
+parse_existing_ports() {
+    local arr=()
+    [[ ! -f "$TARGET_BLOCK_FILE" ]] && echo "${arr[@]}" && return
+    while read -r line; do
+        if [[ "$line" =~ tcp\ dport\ \{\ ([^}]+)\ \} ]]; then
+            for p in $(echo "${BASH_REMATCH[1]}" | tr ',' ' '); do
+                p=$(echo "$p" | tr -d ' ')
+                [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && arr+=("$p")
+            done
+            break
+        fi
+    done < "$TARGET_BLOCK_FILE"
+    printf '%s\n' "${arr[@]}" | sort -nu
+}
+
+# ---------- 无参数或 -help 时默认显示帮助菜单（推荐：下载到本地后 chmod +x，再运行）----------
+RUN_MAIN=""
+if [[ $# -eq 0 || "$1" == "-help" || "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "=========================================="
+    echo "  nft.sh 帮助菜单（中国 IP 端口 block）"
+    echo "  推荐用法: 下载到本地 → chmod +x nft.sh → sudo ./nft.sh"
+    echo "=========================================="
+    echo "  1、查看已 block 的端口列表"
+    echo "  2、删除指定端口"
+    echo "  3、添加/更新 block 端口（执行主流程）"
+    echo "  0、退出"
+    echo "=========================================="
+    read_help() {
+        if [ -r /dev/tty ]; then
+            read -r -p "请选择 [0-3]: " choice < /dev/tty
+        else
+            read -r -p "请选择 [0-3]: " choice
+        fi
+    }
+    read_help
+    case "$choice" in
+        1)
+            ports=($(parse_existing_ports))
+            if [ ${#ports[@]} -eq 0 ]; then
+                echo "当前没有已配置的 block 端口，或 $TARGET_BLOCK_FILE 不存在。"
+            else
+                echo "已 block 的端口列表: ${ports[*]}"
+            fi
+            ;;
+        2)
+            ports=($(parse_existing_ports))
+            if [ ${#ports[@]} -eq 0 ]; then
+                echo "当前没有已配置的 block 端口，无需删除。"
+                exit 0
+            fi
+            echo "当前已 block 端口: ${ports[*]}"
+            if [ -r /dev/tty ]; then
+                read -r -p "请输入要删除的端口号: " del_port < /dev/tty
+            else
+                read -r -p "请输入要删除的端口号: " del_port
+            fi
+            [[ -z "$del_port" || ! "$del_port" =~ ^[0-9]+$ ]] && echo "无效端口，已取消。" && exit 1
+            new_ports=()
+            for p in "${ports[@]}"; do
+                [[ "$p" != "$del_port" ]] && new_ports+=("$p")
+            done
+            if [ ${#new_ports[@]} -eq ${#ports[@]} ]; then
+                echo "未找到端口 $del_port，未做修改。"
+                exit 0
+            fi
+            if [ ${#new_ports[@]} -eq 0 ]; then
+                echo "至少需保留一个 block 端口，已取消删除。"
+                exit 1
+            fi
+            echo "删除后端口列表: ${new_ports[*]}"
+            # 重新下载 IP 并生成配置
+            if ! curl -sSL "$IP_URL" -o "$TMP_IP_FILE"; then
+                echo "❌ 无法下载 IP 库，删除未生效。"
+                exit 1
+            fi
+            [[ ! -s "$TMP_IP_FILE" ]] && echo "❌ 下载文件为空。" && rm -f "$TMP_IP_FILE" && exit 1
+            PORTS_NFT="{ $(IFS=,; echo "${new_ports[*]}") }"
+            IP_COUNT=$(wc -l < "$TMP_IP_FILE")
+            cat <<EOFX > "$TARGET_BLOCK_FILE"
+table inet china_block {
+    set china_ips {
+        type ipv4_addr
+        flags interval
+        elements = {
+$(sed 's/$/,/g' "$TMP_IP_FILE" | sed 's/^/            /g')
+            127.0.0.1/32
+        }
+    }
+
+    chain input_block {
+        type filter hook input priority -10; policy accept;
+
+        tcp dport $PORTS_NFT ip saddr @china_ips counter drop
+        udp dport $PORTS_NFT ip saddr @china_ips counter drop
+    }
+}
+EOFX
+            rm -f "$TMP_IP_FILE"
+            echo "正在检测 nftables 配置语法..."
+            if ! nft -c -f "$NFTABLES_CONF" 2>/dev/null; then
+                echo "❌ 语法检测失败，删除未生效。"
+                exit 1
+            fi
+            echo "✅ 语法检测通过。"
+            echo "正在加载配置并重启 nftables..."
+            if command -v systemctl &>/dev/null && systemctl is-active nftables &>/dev/null; then
+                systemctl restart nftables
+                echo "✅ nftables 已重启，配置已生效。"
+            else
+                nft -f "$NFTABLES_CONF"
+                echo "✅ 已通过 nft -f 加载配置。"
+            fi
+            echo "✅ 已删除端口 $del_port，当前 block 端口: ${new_ports[*]}。"
+            ;;
+        3)
+            RUN_MAIN=1
+            ;;
+        0|"")
+            echo "已退出。"
+            ;;
+        *)
+            echo "无效选择。"
+            ;;
+    esac
+    if [[ "$RUN_MAIN" != "1" ]]; then
+        exit 0
+    fi
+fi
+
 # ---------- 1. 检测并安装 nftables ----------
 install_nftables() {
     if command -v nft &>/dev/null; then
@@ -68,22 +198,7 @@ else
 fi
 
 # ---------- 3. 交互式询问需要 block 的端口 ----------
-# 从已有配置中解析出已存在的端口
-existing_ports=()
-if [ -f "$TARGET_BLOCK_FILE" ]; then
-    while read -r line; do
-        if [[ "$line" =~ tcp\ dport\ \{\ ([^}]+)\ \} ]]; then
-            for p in $(echo "${BASH_REMATCH[1]}" | tr ',' ' '); do
-                p=$(echo "$p" | tr -d ' ')
-                [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && existing_ports+=("$p")
-            done
-            break
-        fi
-    done < "$TARGET_BLOCK_FILE"
-fi
-
-# 去重并排序
-existing_ports=($(printf '%s\n' "${existing_ports[@]}" | sort -nu))
+existing_ports=($(parse_existing_ports))
 if [ ${#existing_ports[@]} -gt 0 ]; then
     echo "当前已配置的 block 端口: ${existing_ports[*]}"
 fi
