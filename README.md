@@ -16,14 +16,6 @@ curl -fsSL https://raw.githubusercontent.com/mryee2023/scripts/refs/heads/main/i
 
 ```
 
-### nftables 指定端口屏蔽大陆 IP 安装脚本
-
-```
-
-curl -sSL "https://raw.githubusercontent.com/mryee2023/scripts/refs/heads/main/nft.sh" -o nft.sh && chmod +x nft.sh && sudo ./nft.sh
-
-```
-
 ---
 
 ### nftables 端口转发管理脚本（交互式）
@@ -63,3 +55,27 @@ NFTABLES_CONFIG=./nftables.conf ./nftables-forward-manager.sh
 ```
 
 默认配置文件路径：`/etc/nftables.conf`。修改配置需 root；测试时可设置 `NFTABLES_CONFIG` 指向本地文件。
+
+---
+
+
+
+### gfw-nft.sh
+
+通过nftables对指定端口封锁大陆IP
+
+1. 首次运行需要初始化一下大陆IP端列表
+
+```
+
+./gfw-nft.sh -u
+
+```
+
+2. 修改/etc/nftables.conf，在最下方添加
+   
+```
+
+include "/etc/nftables/gfw.nft"
+
+```
