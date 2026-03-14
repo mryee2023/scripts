@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/mryee2023/scripts/refs/heads/main/i
 **功能：**
 
 1. **列出当前所有转发** — 表格显示：本地端口 | 目标IP:端口 | 注释
-2. **添加转发** — 输入本地端口、目标 IP:端口、注释；本地端口不可重复
+2. **添加转发** — 输入本地端口（限 50000–60000）、目标 IP:端口、注释；本地端口不可重复
 3. **删除转发** — 按本地端口删除，确认后从配置中移除规则及对应注释
 4. **加载配置并重启** — 先做配置文件语法检测，通过后加载并（如有）重启 nftables 服务
 
@@ -42,16 +42,7 @@ sudo ./nftmgr.sh
 
 ```bash
 # 使用当前目录的 nftables.conf 测试
-NFTABLES_CONFIG=./nftables.conf ./nftables-forward-manager.sh
-```
-
-非交互执行（直接传子命令）：
-
-```bash
-./nftmgr.sh list    # 仅列出转发
-./nftmgr.sh add     # 添加（仍从终端读入）
-./nftmgr.sh delete  # 删除指定端口转发
-./nftmgr.sh load     # 语法检测 + 加载 + 重启
+NFTABLES_CONFIG=./nftables.conf sudo ./nftmgr.sh
 ```
 
 默认配置文件路径：`/etc/nftables.conf`。修改配置需 root；测试时可设置 `NFTABLES_CONFIG` 指向本地文件。
@@ -62,20 +53,26 @@ NFTABLES_CONFIG=./nftables.conf ./nftables-forward-manager.sh
 
 ### gfw-nft.sh
 
-通过nftables对指定端口封锁大陆IP
 
-1. 首次运行需要初始化一下大陆IP端列表
+通过 nftables 对指定端口封锁大陆 IP（TCP/UDP）。
 
+**使用：**
+
+```bash
+# 下载并安装为系统命令
+curl -sSL "https://raw.githubusercontent.com/mryee2023/scripts/refs/heads/main/gfw-nft.sh" -o gfw-nft.sh
+chmod +x gfw-nft.sh
 ```
 
-./gfw-nft.sh -u
-
+```bash
+sudo ./gfw-nft.sh -u              # 初始化/更新大陆 IP 库（首次必须执行）
+sudo ./gfw-nft.sh -a 8388         # 封锁端口 8388
+sudo ./gfw-nft.sh -d 8388         # 解封端口 8388
+sudo ./gfw-nft.sh -l              # 查看当前封锁端口列表
 ```
 
-2. 修改/etc/nftables.conf，在最下方添加
-   
-```
+**持久化：** 规则保存在 `/etc/nftables/gfw.nft`，需在 `/etc/nftables.conf` 末尾添加以下内容才能开机自动生效：
 
+```
 include "/etc/nftables/gfw.nft"
-
 ```

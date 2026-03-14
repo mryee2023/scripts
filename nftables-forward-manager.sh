@@ -78,18 +78,38 @@ port_exists() {
 
 add_forward() {
     title "添加端口转发"
-    read -rp "本地端口: " lport
+    read -rp "本地端口 (50000-60000): " lport
     lport=$(echo "$lport" | tr -d '[:space:]')
     [[ ! "$lport" =~ ^[0-9]+$ ]] && { err "端口必须是数字"; return 1; }
+    [[ "$lport" -lt 50000 || "$lport" -gt 60000 ]] && { err "本地端口须在 50000-60000 范围内"; return 1; }
     [[ $(port_exists "$lport") -eq 1 ]] && { err "端口 $lport 已存在"; return 1; }
-    
-    read -rp "目标 IP:端口 (例 1.2.3.4:80): " target
+
+    read -rp "目标 IP:端口 (例 1.2.3.4:8080): " target
     target=$(echo "$target" | tr -d '[:space:]')
-    [[ ! "$target" =~ ^[0-9.]+:[0-9]+$ ]] && { err "格式错误"; return 1; }
-    
+    # 校验格式：合法 IPv4（每段 0-255）+ 冒号 + 合法端口（1-65535）
+    local tip tport
+    tip="${target%%:*}"
+    tport="${target##*:}"
+    if [[ ! "$tip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || \
+       [[ ! "$tport" =~ ^[0-9]+$ ]] || \
+       [[ "$tport" -lt 1 || "$tport" -gt 65535 ]]; then
+        err "目标格式错误，须为合法 IPv4:端口（如 1.2.3.4:8080）"
+        return 1
+    fi
+    # 逐段验证 IP 每个字节 0-255
+    local IFS='.' seg
+    for seg in $tip; do
+        [[ "$seg" -gt 255 ]] && { err "目标 IP 地址不合法"; return 1; }
+    done
+    local IFS=' '
+
     read -rp "注释: " comment
-    
-    local tmp=$(mktemp)
+
+    local tmp
+    tmp=$(mktemp)
+    local bak="${CONFIG}.bak"
+    cp "$CONFIG" "$bak"
+
     local in_prerouting=0
     local inserted=0
     while IFS= read -r line; do
@@ -103,8 +123,15 @@ add_forward() {
         [[ "$line" =~ chain[[:space:]]postrouting ]] && in_prerouting=0
         echo "$line" >> "$tmp"
     done < "$CONFIG"
-    
+
+    if [[ $inserted -eq 0 ]]; then
+        rm -f "$tmp" "$bak"
+        err "未找到 prerouting 链，规则未写入，请检查配置文件格式"
+        return 1
+    fi
+
     mv "$tmp" "$CONFIG"
+    rm -f "$bak"
     info "已写入配置 (尚未生效，请执行选项 4 加载)"
 }
 
@@ -113,7 +140,9 @@ delete_forward() {
     list_forwards
     read -rp "输入要删除的本地端口: " lport
     lport=$(echo "$lport" | tr -d '[:space:]')
-    
+    [[ ! "$lport" =~ ^[0-9]+$ ]] && { err "端口必须是数字"; return 1; }
+    [[ "$lport" -lt 50000 || "$lport" -gt 60000 ]] && { err "本地端口须在 50000-60000 范围内"; return 1; }
+
     if [[ $(port_exists "$lport") -eq 0 ]]; then
         err "未找到端口 $lport 的转发规则"
         return 1
@@ -143,8 +172,8 @@ delete_forward() {
                 fi
             fi
 
-            # 2. 匹配规则行
-            if [[ "$line" =~ dport[[:space:]]+$lport[[:space:]]+counter[[:space:]]+dnat ]]; then
+            # 2. 匹配规则行（与 parse_forward_rules 保持一致的模式）
+            if [[ "$line" =~ meta[[:space:]]l4proto.*th[[:space:]]dport[[:space:]]+$lport[[:space:]].*dnat[[:space:]]to ]]; then
                 # 匹配到了！丢弃之前记录的注释行，也不写入当前行
                 last_comment_line=""
                 found_and_deleted=1
@@ -194,23 +223,21 @@ load_and_restart() {
         return 1
     fi
 
-    info "语法检测通过，正在将配置加载到内核..."
-    if ! nft -f "$CONFIG"; then
-        err "加载配置到内核失败！"
-        return 1
-    fi
-
-    info "配置已成功加载。"
-    
-    # 检查服务是否存在并尝试重启
-    if command -v systemctl &>/dev/null; then
-        if systemctl is-active --quiet nftables; then
-            info "正在重启 nftables 服务以确保持久化..."
-            systemctl restart nftables
-            info "服务重启成功。"
-        else
-            warn "nftables 服务未运行，仅通过 nft 命令临时生效。"
+    info "语法检测通过，正在加载配置..."
+    # 优先通过 systemctl restart 加载（服务内部执行 nft -f，避免双重加载）
+    # 仅在 systemctl 不可用时才直接调用 nft -f
+    if command -v systemctl &>/dev/null && systemctl is-active --quiet nftables; then
+        if ! systemctl restart nftables; then
+            err "nftables 服务重启失败！"
+            return 1
         fi
+        info "nftables 服务已重启，配置生效。"
+    else
+        if ! nft -f "$CONFIG"; then
+            err "加载配置到内核失败！"
+            return 1
+        fi
+        info "配置已通过 nft -f 临时加载（nftables 服务未运行，重启后需手动重新加载）。"
     fi
 }
 
@@ -233,5 +260,5 @@ main_menu() {
 }
 
 case "${1:-}" in
-    *) while true; do main_menu; read -rp "按回车继续..." _; done ;;
+    *) while true; do main_menu || true; read -rp "按回车继续..." _; done ;;
 esac

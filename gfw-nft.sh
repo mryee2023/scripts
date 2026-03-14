@@ -29,10 +29,16 @@ prepare_env() {
     echo "正在安装必要组件 (nftables, curl)..."
     if command -v apt-get &>/dev/null; then
       apt-get update && apt-get install -y nftables curl
+    elif command -v dnf &>/dev/null; then
+      dnf install -y nftables curl
     elif command -v yum &>/dev/null; then
       yum install -y nftables curl
+    elif command -v apk &>/dev/null; then
+      apk add nftables curl
+    elif command -v zypper &>/dev/null; then
+      zypper install -y nftables curl
     else
-      echo "错误: 请先安装 nftables 和 curl。"
+      echo "错误: 无法识别包管理器，请手动安装 nftables 和 curl 后重试。"
       exit 1
     fi
   fi
@@ -58,23 +64,33 @@ update_ip_list() {
   echo "正在同步最新中国 IP 库 (gaoyifan/china-operator-ip)..."
   ensure_table
 
+  local TEMP_FILE ELEM_FILE
   TEMP_FILE=$(mktemp)
-  if curl -sSfL -o "$TEMP_FILE" "$CN_IP_URL"; then
-    sed 's/\r//g' "$TEMP_FILE" > "${TEMP_FILE}.tmp" && mv "${TEMP_FILE}.tmp" "$TEMP_FILE"
-    ELEM_FILE=$(mktemp)
-    nft flush set inet "$TABLE_NAME" "$SET_NAME" 2>/dev/null || true
-    while IFS= read -r cidr; do
-      [ -z "$cidr" ] && continue
-      echo "add element inet $TABLE_NAME $SET_NAME { $cidr }" >> "$ELEM_FILE"
-    done < "$TEMP_FILE"
-    nft -f "$ELEM_FILE"
-    rm -f "$TEMP_FILE" "$ELEM_FILE"
-    echo "IP 库更新成功！时间: $(date)"
-  else
+  ELEM_FILE=$(mktemp)
+  # set -e 下异常退出时自动清理临时文件
+  trap 'rm -f "$TEMP_FILE" "$ELEM_FILE"' RETURN
+
+  if ! curl -sSfL -o "$TEMP_FILE" "$CN_IP_URL"; then
     echo "错误: 下载 IP 库失败。"
-    rm -f "$TEMP_FILE"
     return 1
   fi
+
+  # 校验内容非空，避免 flush 后加载空文件导致集合被清空
+  if [ ! -s "$TEMP_FILE" ]; then
+    echo "错误: 下载文件为空，已中止更新。"
+    return 1
+  fi
+
+  sed 's/\r//g' "$TEMP_FILE" > "${TEMP_FILE}.tmp" && mv "${TEMP_FILE}.tmp" "$TEMP_FILE"
+
+  while IFS= read -r cidr; do
+    [ -z "$cidr" ] && continue
+    echo "add element inet $TABLE_NAME $SET_NAME { $cidr }" >> "$ELEM_FILE"
+  done < "$TEMP_FILE"
+
+  nft flush set inet "$TABLE_NAME" "$SET_NAME" 2>/dev/null || true
+  nft -f "$ELEM_FILE"
+  echo "IP 库更新成功！时间: $(date)"
 }
 
 save_rules() {
@@ -83,25 +99,55 @@ save_rules() {
   echo "配置已持久化到 $NFTABLES_GFW_FILE"
 }
 
+validate_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || {
+    echo "错误: 无效端口 '$port'（须为 1-65535 的整数）。"
+    exit 1
+  }
+}
+
 add_port() {
+  validate_port "$1"
   ensure_table
   local port="$1"
-  if ! nft list chain inet "$TABLE_NAME" "$CHAIN_NAME" 2>/dev/null | grep -q "tcp dport $port "; then
-    nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" ip saddr @$SET_NAME tcp dport "$port" drop
-    nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" ip saddr @$SET_NAME udp dport "$port" drop
+  local added=0
+  local chain_rules
+  chain_rules=$(nft list chain inet "$TABLE_NAME" "$CHAIN_NAME" 2>/dev/null)
+  for proto in tcp udp; do
+    if ! echo "$chain_rules" | grep -q "$proto dport $port "; then
+      nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" ip saddr @$SET_NAME "$proto" dport "$port" drop
+      added=1
+    fi
+  done
+  if [ "$added" -eq 1 ]; then
     save_rules
     echo "Done! 端口 $port 已封锁中国 IP。"
   else
-    echo "跳过: 规则已存在。"
+    echo "跳过: 端口 $port 规则已存在。"
   fi
 }
 
 del_port() {
+  validate_port "$1"
   local port="$1"
-  nft delete rule inet "$TABLE_NAME" "$CHAIN_NAME" ip saddr @$SET_NAME tcp dport "$port" drop 2>/dev/null || true
-  nft delete rule inet "$TABLE_NAME" "$CHAIN_NAME" ip saddr @$SET_NAME udp dport "$port" drop 2>/dev/null || true
-  save_rules
-  echo "Done! 端口 $port 封锁已解除。"
+  local deleted=0
+  # nftables 只能按 handle 编号删除规则，不能按内容匹配
+  for proto in tcp udp; do
+    local handle
+    handle=$(nft -a list chain inet "$TABLE_NAME" "$CHAIN_NAME" 2>/dev/null \
+      | awk "/$proto dport $port.*drop/ {print \$NF}")
+    if [ -n "$handle" ]; then
+      nft delete rule inet "$TABLE_NAME" "$CHAIN_NAME" handle "$handle"
+      deleted=1
+    fi
+  done
+  if [ "$deleted" -eq 1 ]; then
+    save_rules
+    echo "Done! 端口 $port 封锁已解除。"
+  else
+    echo "跳过: 端口 $port 没有封锁规则，无需解除。"
+  fi
 }
 
 list_ports() {
