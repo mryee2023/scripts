@@ -76,3 +76,33 @@ sudo ./gfw-nft.sh -l              # 查看当前封锁端口列表
 ```
 include "/etc/nftables/gfw.nft"
 ```
+
+---
+
+### gfw-nocn-nft.sh
+
+与 `gfw-nft.sh` 互补：**只允许大陆 IP 访问，屏蔽所有海外 IP**（白名单模式）。同时放行回环、内网、已建立连接，支持端口豁免。
+
+**使用：**
+
+```bash
+# 下载并安装
+curl -sSL "https://raw.githubusercontent.com/mryee2023/scripts/refs/heads/main/gfw-nocn-nft.sh" -o gfw-nocn-nft.sh
+chmod +x gfw-nocn-nft.sh
+```
+
+```bash
+sudo ./gfw-nocn-nft.sh -u              # 初始化/更新大陆 IP 库（首次必须执行）
+sudo ./gfw-nocn-nft.sh -a 1.2.3.4      # 豁免 IP（允许绕过白名单）
+sudo ./gfw-nocn-nft.sh -a 5.6.0.0/16   # 豁免 CIDR 段
+sudo ./gfw-nocn-nft.sh -d 1.2.3.4      # 取消豁免 IP
+sudo ./gfw-nocn-nft.sh -l              # 查看豁免 IP 列表
+sudo ./gfw-nocn-nft.sh -s on|off       # 启用/禁用白名单
+sudo ./gfw-nocn-nft.sh -i              # 查看当前状态
+```
+
+**持久化：** 规则保存在 `/etc/nftables/gfw-nocn.nft`，需在 `/etc/nftables.conf` 末尾添加：
+
+```
+include "/etc/nftables/gfw-nocn.nft"
+```
