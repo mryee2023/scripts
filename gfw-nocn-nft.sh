@@ -52,26 +52,35 @@ prepare_env() {
   fi
 }
 
-# 确保 inet gfw_whitelist 表、集合、链存在
+# 确保 inet gfw_whitelist 表、集合、链存在（完全幂等：逐级检查表→集合→链）
 ensure_table() {
+  # 1. 确保表和集合存在
   if ! nft list table inet "$TABLE_NAME" &>/dev/null; then
     nft add table inet "$TABLE_NAME"
-    nft add set inet "$TABLE_NAME" "$SET_CN" '{ type ipv4_addr; flags interval; }'
+    nft add set inet "$TABLE_NAME" "$SET_CN"     '{ type ipv4_addr; flags interval; }'
     nft add set inet "$TABLE_NAME" "$SET_EXEMPT" '{ type ipv4_addr; flags interval; }'
-    nft add chain inet "$TABLE_NAME" "$CHAIN_NAME" '{ type filter hook input priority -100; policy accept; }'
+  fi
 
-    # 放行已建立的连接
+  # 2. 确保 input 链存在（过滤直连本机的流量）
+  if ! nft list chain inet "$TABLE_NAME" "$CHAIN_NAME" &>/dev/null; then
+    nft add chain inet "$TABLE_NAME" "$CHAIN_NAME" '{ type filter hook input priority -100; policy accept; }'
     nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" ct state established,related accept
-    # 放行回环接口
     nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" iif lo accept
-    # 放行内网 IP
-    nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" ip saddr '{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 }' accept
-    # 放行豁免 IP
+    nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" ip saddr '{ 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 }' accept
     nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" ip saddr @$SET_EXEMPT accept
-    # 放行大陆 IP
     nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" ip saddr @$SET_CN accept
-    # 丢弃其余所有流量
     nft add rule inet "$TABLE_NAME" "$CHAIN_NAME" drop
+  fi
+
+  # 3. 确保 forward 链存在（过滤 DNAT 转发流量，防止海外 IP 经由本机中转）
+  #    forward 链与 input 链规则相同，但不需要放行 lo（转发包不走回环）
+  if ! nft list chain inet "$TABLE_NAME" forward &>/dev/null; then
+    nft add chain inet "$TABLE_NAME" forward '{ type filter hook forward priority -100; policy accept; }'
+    nft add rule inet "$TABLE_NAME" forward ct state established,related accept
+    nft add rule inet "$TABLE_NAME" forward ip saddr '{ 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 }' accept
+    nft add rule inet "$TABLE_NAME" forward ip saddr @$SET_EXEMPT accept
+    nft add rule inet "$TABLE_NAME" forward ip saddr @$SET_CN accept
+    nft add rule inet "$TABLE_NAME" forward drop
   fi
 }
 
