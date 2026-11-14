@@ -41,6 +41,28 @@ case "${ID:-}" in
   *) echo "暂不支持的系统：${ID:-unknown}"; exit 1 ;;
 esac
 
+# 访问日志目录必须事先存在，且 Caddy 服务用户可写。
+# Debian/Ubuntu（apt）与 RHEL 系（dnf/COPR）官方包的服务用户均为 caddy，仍以 unit 中的 User/Group 为准。
+CADDY_USER=$(systemctl show caddy -p User --value 2>/dev/null || true)
+CADDY_GROUP=$(systemctl show caddy -p Group --value 2>/dev/null || true)
+if [[ -z "$CADDY_USER" ]]; then
+  CADDY_USER=caddy
+fi
+if [[ -z "$CADDY_GROUP" ]]; then
+  CADDY_GROUP=$(id -gn "$CADDY_USER" 2>/dev/null || echo "$CADDY_USER")
+fi
+if ! id "$CADDY_USER" >/dev/null 2>&1; then
+  echo "未找到 Caddy 服务用户 ${CADDY_USER}，无法创建访问日志目录"
+  exit 1
+fi
+if ! getent group "$CADDY_GROUP" >/dev/null 2>&1; then
+  CADDY_GROUP=$(id -gn "$CADDY_USER")
+fi
+if ! install -d -o "$CADDY_USER" -g "$CADDY_GROUP" -m 0750 /var/log/caddy; then
+  echo '无法创建访问日志目录 /var/log/caddy（需服务用户可写）'
+  exit 1
+fi
+
 # 访问密钥校验：未携带正确的 X-Proxy-Key 时直接返回 403，不转发到上游
 AUTH_BLOCK=''
 if [[ -n "$PROXY_KEY" ]]; then
@@ -59,6 +81,20 @@ fi
 cat > /etc/caddy/Caddyfile <<CADDY
 ${PROXY_DOMAIN} {
 ${AUTH_BLOCK}
+    # 访问日志保留 User-Agent；删除 X-Proxy-Key，并从 URI 中去掉 token 查询参数（仅影响日志，不改变转发）
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 10MiB
+            roll_keep 5
+        }
+        format filter {
+            request>headers>X-Proxy-Key delete
+            request>uri query {
+                delete token
+            }
+            wrap json
+        }
+    }
     encode zstd gzip
     reverse_proxy https://${UPSTREAM_DOMAIN} {
         header_up Host ${UPSTREAM_DOMAIN}
@@ -81,6 +117,14 @@ CADDY
 
 caddy fmt --overwrite /etc/caddy/Caddyfile
 caddy validate --config /etc/caddy/Caddyfile
+# validate 以 root 执行，若因此创建了日志文件，所有权会是 root，服务用户随后无法写入
+if [[ -e /var/log/caddy/access.log ]]; then
+  chown "$CADDY_USER:$CADDY_GROUP" /var/log/caddy/access.log
+fi
+# RHEL 系若启用 SELinux，恢复默认标签，避免服务用户仍无法写入
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon -R /var/log/caddy >/dev/null 2>&1 || true
+fi
 systemctl enable --now caddy
 systemctl restart caddy
 
@@ -119,6 +163,8 @@ ${AUTH_TIP}${IPV6_WARN}
 
 查看状态：systemctl status caddy
 查看日志：journalctl -u caddy -n 100 --no-pager
+访问日志：/var/log/caddy/access.log（超过 10MiB 自动轮转，保留 5 个文件；已去掉 X-Proxy-Key 和 URI 中的 token，User-Agent 会保留）
+查看时间、客户端 IP、User-Agent 与 URI：sudo jq -r '[.ts, .request.client_ip, (.request.headers["User-Agent"][0] // ""), .request.uri] | @tsv' /var/log/caddy/access.log
 配置文件：/etc/caddy/Caddyfile
 
 注意：首次 HTTPS 证书申请可能需要一点时间；确保 DNS 已解析到本机且 TCP 80/443 已放通。
